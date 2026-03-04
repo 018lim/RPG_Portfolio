@@ -57,10 +57,17 @@ class PortfolioEditor(ft.UserControl):
 
         # 🚀 [핵심 수정] DataColumn 자체에 너비를 강제 부여
         self.data_table = ft.DataTable(
+            column_spacing=30,
+            heading_row_height=50,  # 👈 헤더의 위아래 높이를 50px로 딱 보기 좋게 고정합니다.
             columns=[
                 ft.DataColumn(ft.Text("선택")),
-                ft.DataColumn(ft.Text("종목명 / 티커")),
-                ft.DataColumn(ft.Text("수량")),
+                ft.DataColumn(
+                    # 👈 alignment=ft.alignment.center_left 를 추가하여 빈 공간 없이 글자를 세로 중앙에 배치!
+                    ft.Container(content=ft.Text("종목명 / 티커"), width=200, alignment=ft.alignment.center_left)
+                ),
+                ft.DataColumn(
+                    ft.Container(content=ft.Text("수량"), width=120, alignment=ft.alignment.center_left)
+                ),
                 ft.DataColumn(ft.Text("상태")),
             ],
             rows=[]
@@ -82,17 +89,8 @@ class PortfolioEditor(ft.UserControl):
                 padding=10, border=ft.border.all(1, ft.colors.GREY_400), border_radius=10
             ),
             ft.Container(
-                # 🚀 [핵심 해결] vertical_alignment=ft.CrossAxisAlignment.START 를 추가하여 표를 위쪽에 찰싹 붙입니다!
-                content=ft.Row(
-                    [self.data_table], 
-                    scroll=ft.ScrollMode.ALWAYS,
-                    vertical_alignment=ft.CrossAxisAlignment.START 
-                ),
-                border=ft.border.all(1, ft.colors.GREY_300), 
-                border_radius=10, 
-                padding=10, 
-                height=300,
-                alignment=ft.alignment.top_left # 🚀 컨테이너 내부 기준 위치도 상단 좌측으로 강제 고정
+                content=ft.Row([self.data_table], scroll=ft.ScrollMode.ALWAYS), # 🚀 가로 스크롤 필수 적용
+                border=ft.border.all(1, ft.colors.GREY_300), border_radius=10, padding=10, height=300,
             ),
             ft.Container(
                 content=ft.Row([self.btn_confirm, self.btn_analyze, self.btn_cancel], alignment=ft.MainAxisAlignment.CENTER),
