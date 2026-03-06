@@ -3,8 +3,13 @@ import yfinance as yf
 import threading
 import pandas as pd
 import requests
+import urllib3
+import os
+import json
 from data.database import db
 from src.analysis import AnalysisEngine
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 _krx_cache_df = None
 
@@ -12,7 +17,8 @@ class PortfolioEditor(ft.UserControl):
     def __init__(self, on_analysis_complete=None):
         super().__init__()
         self.rows = []
-        self.analysis_engine = AnalysisEngine()
+        # 초기에 엔진을 만들지만, 나중에 슬라이더 값에 따라 다시 생성합니다!
+        self.analysis_engine = AnalysisEngine(months=12) 
         self.on_analysis_complete = on_analysis_complete
         
         self.paste_field = ft.TextField(
@@ -55,19 +61,35 @@ class PortfolioEditor(ft.UserControl):
             visible=False
         )
 
-        # 🚀 [핵심 수정] DataColumn 자체에 너비를 강제 부여
+        # 🚀 [새로운 무기] 12개월 ~ 60개월 조절 슬라이더!
+        self.month_text = ft.Text("12개월", weight="bold", size=18, color="blue")
+        self.month_slider = ft.Slider(
+            min=12, max=60, divisions=48, value=12, # 12부터 60까지 1단위로 쪼갬 (60-12=48)
+            label="{value}개월",
+            on_change=self.update_slider_text,
+            expand=True,
+            active_color="blue"
+        )
+        
+        self.period_container = ft.Container(
+            content=ft.Column([
+                ft.Text("📈 정밀 분석 기간 설정 (과거 데이터 수집 기간)", weight="bold"),
+                ft.Row([self.month_slider, self.month_text])
+            ]),
+            padding=15,
+            border=ft.border.all(1, ft.colors.BLUE_200),
+            border_radius=10,
+            bgcolor=ft.colors.BLUE_50,
+            visible=False # 처음에는 숨겨둡니다.
+        )
+
         self.data_table = ft.DataTable(
             column_spacing=30,
-            heading_row_height=50,  # 👈 헤더의 위아래 높이를 50px로 딱 보기 좋게 고정합니다.
+            heading_row_height=50,
             columns=[
                 ft.DataColumn(ft.Text("선택")),
-                ft.DataColumn(
-                    # 👈 alignment=ft.alignment.center_left 를 추가하여 빈 공간 없이 글자를 세로 중앙에 배치!
-                    ft.Container(content=ft.Text("종목명 / 티커"), width=200, alignment=ft.alignment.center_left)
-                ),
-                ft.DataColumn(
-                    ft.Container(content=ft.Text("수량"), width=120, alignment=ft.alignment.center_left)
-                ),
+                ft.DataColumn(ft.Container(content=ft.Text("종목명 / 티커"), width=200, alignment=ft.alignment.center_left)),
+                ft.DataColumn(ft.Container(content=ft.Text("수량"), width=120, alignment=ft.alignment.center_left)),
                 ft.DataColumn(ft.Text("상태")),
             ],
             rows=[]
@@ -81,6 +103,11 @@ class PortfolioEditor(ft.UserControl):
         for item in saved_portfolio:
             self.add_row(item['ticker'], item['quantity'])
 
+    def update_slider_text(self, e):
+        """슬라이더를 움직일 때 글자도 같이 변하게 만듭니다."""
+        self.month_text.value = f"{int(e.control.value)}개월"
+        self.month_text.update()
+
     def build(self):
         return ft.Column([
             ft.Text("보유 비급 목록 (Portfolio)", size=20, weight="bold"),
@@ -89,9 +116,12 @@ class PortfolioEditor(ft.UserControl):
                 padding=10, border=ft.border.all(1, ft.colors.GREY_400), border_radius=10
             ),
             ft.Container(
-                content=ft.Row([self.data_table], scroll=ft.ScrollMode.ALWAYS), # 🚀 가로 스크롤 필수 적용
-                border=ft.border.all(1, ft.colors.GREY_300), border_radius=10, padding=10, height=300,
+                content=ft.Row([self.data_table], scroll=ft.ScrollMode.ALWAYS, vertical_alignment=ft.CrossAxisAlignment.START),
+                border=ft.border.all(1, ft.colors.GREY_300), 
+                border_radius=10, padding=10, height=300, alignment=ft.alignment.top_left
             ),
+            # 🚀 슬라이더 컨테이너를 표와 버튼 사이에 배치!
+            self.period_container,
             ft.Container(
                 content=ft.Row([self.btn_confirm, self.btn_analyze, self.btn_cancel], alignment=ft.MainAxisAlignment.CENTER),
                 padding=20
@@ -101,61 +131,60 @@ class PortfolioEditor(ft.UserControl):
     def _resolve_stock_info(self, user_input):
         global _krx_cache_df
         clean_input = user_input.replace(" ", "").upper()
-        
-        mapping = {
-            "테슬라": "TSLA", "애플": "AAPL", "마이크로소프트": "MSFT", "엔비디아": "NVDA", "팔란티어":"PLTR",
-            "구글": "GOOGL", "아마존": "AMZN", "메타": "META", "브로드컴": "AVGO",
-            "티에스엠": "TSM", "AMD": "AMD", "인텔": "INTC", "마이크론": "MU",
-            "스타벅스": "SBUX", "코카콜라": "KO", "나이키": "NKE", "리얼티인컴": "O",
-            "삼성전자": "005930.KS", "SK하이닉스": "000660.KS", "카카오": "035720.KS", "네이버": "035420.KS",
-            "현대차": "005380.KS", "기아": "000270.KS"
-        }
-        for key, val in mapping.items():
-            if key.replace(" ", "").upper() == clean_input:
-                return key, val
-        for key, val in mapping.items():
-            if val.upper() == clean_input:
-                return key, val
+
+        try:
+            mapping_file = "data/stockName_mapping.json" 
+            if os.path.exists(mapping_file):
+                with open(mapping_file, "r", encoding="utf-8") as f:
+                    custom_mapping = json.load(f)
+                normalized_mapping = {str(k).replace(" ", "").upper(): v for k, v in custom_mapping.items()}
+                
+                if clean_input in normalized_mapping:
+                    ticker = normalized_mapping[clean_input]
+                    return user_input, ticker
+        except Exception:
+            pass
 
         try:
             if _krx_cache_df is None:
-                url = "https://raw.githubusercontent.com/corazzon/finance-data-analysis/main/krx.csv"
-                df = pd.read_csv(url, dtype={'Symbol': str}) 
-                df['CleanName'] = df['Name'].astype(str).str.replace(" ", "").str.upper()
-                _krx_cache_df = df
+                url = "https://finance.naver.com/api/sise/etfItemList.nhn"
+                headers = {'User-Agent': 'Mozilla/5.0'}
+                res = requests.get(url, headers=headers, timeout=5, verify=False)
+                
+                if res.status_code == 200:
+                    data = res.json()
+                    etf_list = data.get('result', {}).get('etfItemList', [])
+                    df = pd.DataFrame(etf_list)
+                    df['CleanName'] = df['itemname'].astype(str).str.replace(" ", "").str.upper()
+                    _krx_cache_df = df
 
             if _krx_cache_df is not None:
                 match = _krx_cache_df[_krx_cache_df['CleanName'] == clean_input]
                 if match.empty:
                     base_code = clean_input.replace(".KS", "").replace(".KQ", "")
-                    match = _krx_cache_df[_krx_cache_df['Symbol'] == base_code]
-
+                    match = _krx_cache_df[_krx_cache_df['itemcode'] == base_code]
+                
                 if not match.empty:
-                    code = str(match.iloc[0]['Symbol']).zfill(6)
-                    mkt = str(match.iloc[0].get('Market', 'KOSPI')).upper()
-                    suffix = ".KQ" if 'KOSDAQ' in mkt else ".KS"
-                    ticker = f"{code}{suffix}"
-                    name = str(match.iloc[0]['Name'])
-                    return name, ticker
-        except Exception as e:
-            pass
+                    code = str(match.iloc[0]['itemcode']).zfill(6)
+                    name = str(match.iloc[0]['itemname'])
+                    return name, f"{code}.KS"
+
+        except Exception:
+            pass 
 
         try:
             url = f"https://query2.finance.yahoo.com/v1/finance/search?q={user_input}"
             headers = {'User-Agent': 'Mozilla/5.0'}
-            res = requests.get(url, headers=headers, timeout=5)
+            res = requests.get(url, headers=headers, timeout=5, verify=False)
+            
             if res.status_code == 200:
                 quotes = res.json().get('quotes', [])
-                if quotes:
-                    target_q = None
-                    for q in quotes:
-                        if q.get('symbol', '').endswith('.KS') or q.get('symbol', '').endswith('.KQ'):
-                            target_q = q; break
-                    if not target_q: target_q = quotes[0]
-                    sym = target_q.get('symbol', '')
-                    name = target_q.get('shortname', sym) 
-                    return name, sym
-        except:
+                for q in quotes:
+                    sym = q.get('symbol', '').upper()
+                    name = q.get('shortname', sym).upper()
+                    if clean_input == sym.replace(".", "").replace("-", "") or clean_input == name.replace(" ", ""):
+                        return q.get('shortname', q.get('symbol')), q.get('symbol')
+        except Exception:
             pass
 
         return user_input.upper(), user_input.upper()
@@ -165,27 +194,20 @@ class PortfolioEditor(ft.UserControl):
         ticker_val = ticker.strip() if ticker else ""
         
         ticker_field = ft.TextField(
-            value=ticker_val, 
-            width=200,          
-            dense=True,
-            content_padding=10,
-            on_change=lambda e: self.validate_row_change(e)
+            value=ticker_val, width=200, dense=True, content_padding=10,
+            on_submit=lambda e: self.validate_row_change(e), 
+            on_blur=lambda e: self.validate_row_change(e)    
         )
+        
         qty_field = ft.TextField(
-            value=str(quantity), 
-            width=120,          
-            dense=True,
-            content_padding=10,
+            value=str(quantity), width=120, dense=True, content_padding=10,
             keyboard_type=ft.KeyboardType.NUMBER
         )
         status_icon = ft.Icon(name=ft.icons.QUESTION_MARK, color="grey")
         
         row_controls = {
-            "check": checkbox, 
-            "ticker": ticker_field, 
-            "qty": qty_field, 
-            "status": status_icon,
-            "actual_ticker": ticker_val.upper()
+            "check": checkbox, "ticker": ticker_field, "qty": qty_field, 
+            "status": status_icon, "actual_ticker": ticker_val.upper()
         }
         
         new_row = ft.DataRow(cells=[
@@ -295,6 +317,10 @@ class PortfolioEditor(ft.UserControl):
             return
         self.btn_group_edit.visible = False; self.paste_field.disabled = True
         self.btn_confirm.visible = False; self.btn_analyze.visible = True; self.btn_cancel.visible = True
+        
+        # 🚀 입력 완료를 누르면, 숨겨뒀던 "기간 설정 슬라이더"가 나타납니다!
+        self.period_container.visible = True 
+        
         for r in self.rows:
             r["controls"]["ticker"].read_only = True; r["controls"]["qty"].read_only = True; r["controls"]["check"].disabled = True
         self.update()
@@ -302,6 +328,10 @@ class PortfolioEditor(ft.UserControl):
     def cancel_confirm_mode(self, e):
         self.btn_group_edit.visible = True; self.paste_field.disabled = False
         self.btn_confirm.visible = True; self.btn_analyze.visible = False; self.btn_cancel.visible = False
+        
+        # 🚀 취소를 누르면 다시 숨깁니다.
+        self.period_container.visible = False
+        
         for r in self.rows:
             r["controls"]["ticker"].read_only = False; r["controls"]["qty"].read_only = False; r["controls"]["check"].disabled = False
         self.update()
@@ -309,7 +339,12 @@ class PortfolioEditor(ft.UserControl):
     def execute_analysis(self, e):
         count = 0
         current_user = "test_user"
-        self.page.snack_bar = ft.SnackBar(ft.Text("⏳ 분석 중..."), bgcolor="blue")
+        
+        # 🚀 [핵심 연결] 사용자가 슬라이더로 맞춘 "N개월"을 읽어와서 엔진을 새로 장착합니다!!
+        selected_months = int(self.month_slider.value)
+        self.analysis_engine = AnalysisEngine(months=selected_months)
+        
+        self.page.snack_bar = ft.SnackBar(ft.Text(f"⏳ {selected_months}개월 치 과거 데이터를 긁어옵니다..."), bgcolor="blue")
         self.page.snack_bar.open = True; self.page.update()
 
         db.clear_portfolio(current_user)
@@ -333,9 +368,9 @@ class PortfolioEditor(ft.UserControl):
         else:
             db.update_portfolio_summary(current_user, {"total_value": 0, "sharp": 0, "beta": 0, "mdd": 0, "stand_dev": 0, "upside_dev": 0})
         
-        self.page.snack_bar = ft.SnackBar(ft.Text(f"✅ {count}개 종목 분석 완료!"), bgcolor="green")
+        self.page.snack_bar = ft.SnackBar(ft.Text(f"✅ {count}개 종목 ({selected_months}개월) 분석 완료!"), bgcolor="green")
         self.page.snack_bar.open = True
-        self.cancel_confirm_mode(e)
+        self.cancel_confirm_mode(e) # 돌아갈 때 슬라이더도 같이 숨겨집니다.
         
         if self.on_analysis_complete: 
             self.on_analysis_complete()

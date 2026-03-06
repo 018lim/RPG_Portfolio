@@ -1,17 +1,16 @@
+# Python 캐시
+__pycache__/
+*.py[cod]
+*$py.class
+
 # 가상환경
 venv/
-env/
-
-# 파이썬 캐시 파일
-__pycache__/
-*.pyc
-
-# Flet 및 기타 빌드 파일
-.flet/
-build/
-
-# 환경변수 (비밀번호, API 키 등)
 .env
 
-# SQLite 데이터베이스 (테스트용 DB가 깃허브에 올라가는 것 방지)
-*.db
+# 데이터베이스 (가장 중요!)
+# 캐싱된 데이터와 사용자 비번이 포함된 DB 파일은 올리지 않습니다.
+data/murim_warrior.db
+
+# 운영체제 관련
+.DS_Store
+Thumbs.db

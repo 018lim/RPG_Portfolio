@@ -4,7 +4,6 @@ import os
 class DatabaseManager:
     def __init__(self, db_path="data/murim_warrior.db"):
         self.db_path = db_path
-        # data 폴더가 없으면 자동 생성
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         self.init_db()
 
@@ -25,7 +24,7 @@ class DatabaseManager:
                 )
             """)
             
-            # 2. Portfolio Table (개별 비급 수집 내역)
+            # 2. Portfolio Table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS portfolio (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -36,7 +35,7 @@ class DatabaseManager:
                 )
             """)
             
-            # 3. Warrior Stats Table (개별 종목 스탯)
+            # 3. Warrior Stats Table (초기 생성 시 신규 지표 포함)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS warrior_stats (
                     ticker TEXT PRIMARY KEY,
@@ -45,11 +44,14 @@ class DatabaseManager:
                     beta REAL,
                     mdd REAL,
                     stand_dev REAL,
-                    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    last_updated TEXT,
+                    months INTEGER DEFAULT 12,
+                    cum_return REAL DEFAULT 0.0,
+                    cagr REAL DEFAULT 0.0
                 )
             """)
             
-            # 4. Portfolio Summary Table (계좌 전체 5대 지표 및 총자산)
+            # 4. Portfolio Summary Table (초기 생성 시 신규 지표 포함)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS portfolio_summary (
                     userid TEXT PRIMARY KEY,
@@ -59,30 +61,71 @@ class DatabaseManager:
                     mdd REAL,
                     upside_dev REAL,
                     stand_dev REAL,
+                    cum_return REAL DEFAULT 0.0,
+                    cagr REAL DEFAULT 0.0,
+                    simulated_profit REAL DEFAULT 0.0,
                     last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+
+            # 🚀 [DB 자동 진화 마법] 기존에 생성된 DB 파일용 하위 호환성 유지
+            new_columns_warrior = [
+                ("months", "INTEGER DEFAULT 12"),
+                ("cum_return", "REAL DEFAULT 0.0"),
+                ("cagr", "REAL DEFAULT 0.0")
+            ]
+            for col_name, col_type in new_columns_warrior:
+                try:
+                    cursor.execute(f"ALTER TABLE warrior_stats ADD COLUMN {col_name} {col_type}")
+                except sqlite3.OperationalError:
+                    pass 
+
+            new_columns_summary = [
+                ("cum_return", "REAL DEFAULT 0.0"),
+                ("cagr", "REAL DEFAULT 0.0"),
+                ("simulated_profit", "REAL DEFAULT 0.0")
+            ]
+            for col_name, col_type in new_columns_summary:
+                try:
+                    cursor.execute(f"ALTER TABLE portfolio_summary ADD COLUMN {col_name} {col_type}")
+                except sqlite3.OperationalError:
+                    pass
+
             conn.commit()
+
+    # ==========================================
+    # 🚀 캐싱 전용 통신 함수
+    # ==========================================
+    def get_market_data(self, ticker):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT ticker, yesterday_price, sharp, beta, mdd, stand_dev, last_updated, months, cum_return, cagr
+                FROM warrior_stats 
+                WHERE ticker=?
+            """, (ticker,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def save_market_data(self, stats_dict):
+        self.update_warrior_stats(stats_dict)
 
     # ==========================================
     # 개별 종목 (Portfolio & Warrior Stats) 관련 함수
     # ==========================================
     def get_user_portfolio(self, userid):
-        """[조회] 유저의 포트폴리오 목록(종목, 수량)만 가져옵니다."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT ticker, quantity FROM portfolio WHERE userid=?", (userid,))
             return [dict(row) for row in cursor.fetchall()]
 
     def clear_portfolio(self, userid):
-        """[삭제] 유저의 기존 포트폴리오를 모두 비웁니다."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM portfolio WHERE userid=?", (userid,))
             conn.commit()
 
     def save_portfolio_item(self, userid, ticker, quantity):
-        """[저장] 개별 종목과 수량을 DB에 저장합니다."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT id, quantity FROM portfolio WHERE userid=? AND ticker=?", (userid, ticker))
@@ -94,35 +137,37 @@ class DatabaseManager:
             conn.commit()
 
     def update_warrior_stats(self, stats_dict):
-        """[저장] 개별 종목의 분석 스탯을 업데이트합니다."""
+        if 'last_updated' not in stats_dict: stats_dict['last_updated'] = ''
+        if 'months' not in stats_dict: stats_dict['months'] = 12
+        if 'cum_return' not in stats_dict: stats_dict['cum_return'] = 0.0
+        if 'cagr' not in stats_dict: stats_dict['cagr'] = 0.0
+            
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                INSERT INTO warrior_stats (ticker, yesterday_price, sharp, beta, mdd, stand_dev, last_updated)
-                VALUES (:ticker, :yesterday_price, :sharp, :beta, :mdd, :stand_dev, CURRENT_TIMESTAMP)
+                INSERT INTO warrior_stats 
+                (ticker, yesterday_price, sharp, beta, mdd, stand_dev, last_updated, months, cum_return, cagr)
+                VALUES (:ticker, :yesterday_price, :sharp, :beta, :mdd, :stand_dev, :last_updated, :months, :cum_return, :cagr)
                 ON CONFLICT(ticker) DO UPDATE SET
                     yesterday_price = excluded.yesterday_price,
                     sharp = excluded.sharp,
                     beta = excluded.beta,
                     mdd = excluded.mdd,
                     stand_dev = excluded.stand_dev,
-                    last_updated = CURRENT_TIMESTAMP
+                    last_updated = excluded.last_updated,
+                    months = excluded.months,
+                    cum_return = excluded.cum_return,
+                    cagr = excluded.cagr
             """, stats_dict)
             conn.commit()
 
     def get_user_portfolio_stats(self, userid):
-        """[조회] 대시보드 하단 표를 위해 보유 종목과 그 스탯을 합쳐서 가져옵니다."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT 
-                    p.ticker, 
-                    p.quantity, 
-                    w.yesterday_price, 
-                    w.sharp, 
-                    w.beta, 
-                    w.mdd, 
-                    w.stand_dev
+                    p.ticker, p.quantity, 
+                    w.yesterday_price, w.sharp, w.beta, w.mdd, w.stand_dev, w.cum_return, w.cagr
                 FROM portfolio p
                 LEFT JOIN warrior_stats w ON p.ticker = w.ticker
                 WHERE p.userid = ?
@@ -133,13 +178,16 @@ class DatabaseManager:
     # 포트폴리오 전체 종합 (Portfolio Summary) 관련 함수
     # ==========================================
     def update_portfolio_summary(self, userid, stats_dict):
-        """[저장] 계좌 전체의 종합 분석 결과(5대 지표)를 저장합니다."""
+        if 'cum_return' not in stats_dict: stats_dict['cum_return'] = 0.0
+        if 'cagr' not in stats_dict: stats_dict['cagr'] = 0.0
+        if 'simulated_profit' not in stats_dict: stats_dict['simulated_profit'] = 0.0
+
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO portfolio_summary 
-                (userid, total_value, sharp, beta, mdd, upside_dev, stand_dev, last_updated)
-                VALUES (:userid, :total_value, :sharp, :beta, :mdd, :upside_dev, :stand_dev, CURRENT_TIMESTAMP)
+                (userid, total_value, sharp, beta, mdd, upside_dev, stand_dev, cum_return, cagr, simulated_profit, last_updated)
+                VALUES (:userid, :total_value, :sharp, :beta, :mdd, :upside_dev, :stand_dev, :cum_return, :cagr, :simulated_profit, CURRENT_TIMESTAMP)
                 ON CONFLICT(userid) DO UPDATE SET
                     total_value = excluded.total_value,
                     sharp = excluded.sharp,
@@ -147,17 +195,19 @@ class DatabaseManager:
                     mdd = excluded.mdd,
                     upside_dev = excluded.upside_dev,
                     stand_dev = excluded.stand_dev,
+                    cum_return = excluded.cum_return,
+                    cagr = excluded.cagr,
+                    simulated_profit = excluded.simulated_profit,
                     last_updated = CURRENT_TIMESTAMP
             """, {'userid': userid, **stats_dict})
             conn.commit()
 
     def get_portfolio_summary(self, userid):
-        """[조회] 대시보드 상단 카드를 위해 계좌 종합 스탯을 가져옵니다."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM portfolio_summary WHERE userid=?", (userid,))
             row = cursor.fetchone()
             return dict(row) if row else None
 
-# 다른 파일에서 db.get_user_portfolio() 처럼 바로 쓸 수 있게 객체 생성
+# 모듈 객체 생성
 db = DatabaseManager()

@@ -1,4 +1,6 @@
 flet
 yfinance
+FinanceDataReader
 pandas
 numpy
+requests
